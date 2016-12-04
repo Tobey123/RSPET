@@ -179,6 +179,9 @@ class Essentials(Plugin):
                 host.purge()
                 ret[0] = "basic"
                 ret[1] = 2 # Socket Error Code
+            except KeyboardInterrupt:
+                self.kill(server, args)
+                ret[1] = 8 # Aborted Code
         return ret
 
     def install_plugin(self, server, args):
